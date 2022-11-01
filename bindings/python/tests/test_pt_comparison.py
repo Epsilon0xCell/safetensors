@@ -1,15 +1,9 @@
-import datetime
-import os
 import unittest
 
 import torch
 
-from huggingface_hub import hf_hub_download
 from safetensors.safetensors_rust import safe_open
 from safetensors.torch import load_file, save_file
-
-
-MODEL_ID = os.getenv("MODEL_ID", "gpt2")
 
 
 class TorchTestCase(unittest.TestCase):
@@ -43,42 +37,25 @@ class TorchTestCase(unittest.TestCase):
             save_file(data, local)
 
 
-class SpeedTestCase(unittest.TestCase):
+class LoadTestCase(unittest.TestCase):
     def setUp(self):
-        self.filename = hf_hub_download(MODEL_ID, filename="pytorch_model.bin")
-        self.local = "./tests/data/out_safe_pt_mmap.safetensors"
-        if not os.path.exists(self.local):
-            data = torch.load(self.filename, map_location="cpu")
-            # Need to copy since that call mutates the tensors to numpy
-            save_file(data.copy(), self.local)
+        data = {
+            "test": torch.zeros((1024, 1024), dtype=torch.float32),
+            "test2": torch.zeros((1024, 1024), dtype=torch.float32),
+            "test3": torch.zeros((1024, 1024), dtype=torch.float32),
+        }
+        self.pt_filename = "./tests/data/pt_load.pt"
+        self.sf_filename = "./tests/data/pt_load.safetensors"
+
+        with open(self.pt_filename, "wb") as f:
+            torch.save(data, f)
+
+        save_file(data, self.sf_filename)
 
     def test_deserialization_safe(self):
-        W = 1
-        N = 1
+        tweights = torch.load(self.pt_filename)
+        weights = load_file(self.sf_filename)
 
-        for i in range(W):
-            torch.load(self.filename)
-        pt_timing = datetime.timedelta(0)
-        for i in range(N):
-            start = datetime.datetime.now()
-            tweights = torch.load(self.filename)
-            pt_time = datetime.datetime.now() - start
-            pt_timing += pt_time
-        pt_time = pt_timing / N
-
-        for i in range(W):
-            load_file(self.local)
-        safe_timing = datetime.timedelta(0)
-        for i in range(N):
-            start = datetime.datetime.now()
-            weights = load_file(self.local)
-            safe_time = datetime.datetime.now() - start
-            safe_timing += safe_time
-        safe_time = safe_timing / N
-
-        print()
-        print(f"Deserialization (Safe) took {safe_time}")
-        print(f"Deserialization (PT) took {pt_time} (Safe is {pt_time/safe_time} faster)")
         for k, v in weights.items():
             tv = tweights[k]
             self.assertTrue(torch.allclose(v, tv))
@@ -87,22 +64,11 @@ class SpeedTestCase(unittest.TestCase):
     @unittest.skipIf(not torch.cuda.is_available(), "Cuda is not available")
     def test_deserialization_safe_gpu(self):
         # First time to hit disk
-        torch.load(self.filename, map_location="cuda:0")
-        start = datetime.datetime.now()
-        tweights = torch.load(self.filename, map_location="cuda:0")
-        pt_time = datetime.datetime.now() - start
+        tweights = torch.load(self.pt_filename, map_location="cuda:0")
 
-        # First time to hit disk
-        load_file(self.local, device=0)
-        load_file(self.local, device="cuda:0")
-        # Second time we should be in disk cache
-        start = datetime.datetime.now()
-        weights = load_file(self.local, device="cuda:0")
-        safe_time = datetime.datetime.now() - start
+        load_file(self.sf_filename, device=0)
+        weights = load_file(self.sf_filename, device="cuda:0")
 
-        print()
-        print(f"Deserialization (Safe - GPU) took {safe_time}")
-        print(f"Deserialization (PT - GPU) took {pt_time} (Safe is {pt_time/safe_time} faster)")
         for k, v in weights.items():
             tv = tweights[k]
             self.assertTrue(torch.allclose(v, tv))
@@ -110,26 +76,12 @@ class SpeedTestCase(unittest.TestCase):
 
     @unittest.skipIf(not torch.cuda.is_available(), "Cuda is not available")
     def test_deserialization_safe_gpu_slice(self):
-        # First time to hit disk
-        load_file(self.local, device="cuda:0")
-        # Second time we should be in disk cache
-        start = datetime.datetime.now()
-
         weights = {}
-        with safe_open(self.local, framework="pt", device="cuda:0") as f:
+        with safe_open(self.sf_filename, framework="pt", device="cuda:0") as f:
             for k in f.keys():
                 weights[k] = f.get_slice(k)[:1]
-        safe_time = datetime.datetime.now() - start
-
-        # First time to hit disk
-        torch.load(self.filename, map_location="cuda:0")
-        start = datetime.datetime.now()
-        tweights = torch.load(self.filename, map_location="cuda:0")
+        tweights = torch.load(self.pt_filename, map_location="cuda:0")
         tweights = {k: v[:1] for k, v in tweights.items()}
-        pt_time = datetime.datetime.now() - start
-        print()
-        print(f"Deserialization (Safe - GPU) took {safe_time}")
-        print(f"Deserialization (PT - GPU) took {pt_time} (Safe is {pt_time/safe_time} faster)")
         for k, v in weights.items():
             tv = tweights[k]
             self.assertTrue(torch.allclose(v, tv))
@@ -137,43 +89,13 @@ class SpeedTestCase(unittest.TestCase):
 
     @unittest.skipIf(torch.cuda.device_count() < 2, "Only 1 device available")
     def test_deserialization_safe_device_1(self):
-        # First time to hit disk
-        load_file(self.local, device=1)
-        load_file(self.local, device="cuda:1")
-        # Second time we should be in disk cache
-        start = datetime.datetime.now()
-
-        weights = load_file(self.local, device="cuda:1")
-        safe_time = datetime.datetime.now() - start
-
-        # First time to hit disk
-        torch.load(self.filename, map_location="cuda:1")
-        start = datetime.datetime.now()
-        tweights = torch.load(self.filename, map_location="cuda:1")
-        pt_time = datetime.datetime.now() - start
-        print()
-        print(f"Deserialization (Safe - GPU) took {safe_time}")
-        print(f"Deserialization (PT - GPU) took {pt_time} (Safe is {pt_time/safe_time} faster)")
+        load_file(self.sf_filename, device=1)
+        weights = load_file(self.sf_filename, device="cuda:1")
+        tweights = torch.load(self.pt_filename, map_location="cuda:1")
         for k, v in weights.items():
             tv = tweights[k]
             self.assertTrue(torch.allclose(v, tv))
             self.assertEqual(v.device, torch.device("cuda:1"))
-
-    def test_serialization_safe(self):
-        data = torch.load(self.filename, map_location="cpu")
-        start = datetime.datetime.now()
-        outfilename = "./tests/data/out_safe.safetensors"
-        save_file(data, outfilename)
-        safe_time = datetime.datetime.now() - start
-
-        start = datetime.datetime.now()
-        with open("./tests/data/out_pt.safetensors", "wb") as f:
-            torch.save(data, f)
-        pt_time = datetime.datetime.now() - start
-
-        print()
-        print(f"Serialization (safe) took {safe_time}")
-        print(f"Serialization (PT) took {pt_time} (Safe is {pt_time/safe_time} faster)")
 
 
 class SliceTestCase(unittest.TestCase):
